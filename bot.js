@@ -18,7 +18,7 @@ if (!TELEGRAM_BOT_TOKEN) {
 const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
 
 // --- Database Setup ---
-const db = new sqlite3.Database('./crypto_bot_data_v6_2.db', (err) => {
+const db = new sqlite3.Database('./crypto_bot_data_v6_3.db', (err) => {
     if (err) {
         console.error("Error opening database", err.message);
     } else {
@@ -40,7 +40,6 @@ const CRYPTOS = [
 ];
 let fearAndGreedIndex = { value: 50, classification: 'Neutral' };
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-// ## BARU: State untuk menangani aksi multi-langkah (seperti input jumlah)
 const userActionStates = {};
 
 
@@ -73,7 +72,17 @@ function updateUserSetting(telegram_id, setting, value) { return new Promise((re
 async function getFearAndGreedIndex() { try { const r = await axios.get('https://api.alternative.me/fng/?limit=1'); fearAndGreedIndex = { value: parseInt(r.data.data[0].value), classification: r.data.data[0].value_classification }; } catch (e) { console.error('❌ Could not fetch F&G Index:', e.message); } }
 async function fetchAndStoreHistoricalData(crypto, interval = '1h') { const limit = interval === '1h' ? 500 : 250; try { const r = await axios.get(`https://api.binance.com/api/v3/klines?symbol=${crypto.symbol}&interval=${interval}&limit=${limit}`, { timeout: 30000 }); const stmt = db.prepare("INSERT OR IGNORE INTO market_data (symbol, timestamp, open, high, low, close, volume) VALUES (?, ?, ?, ?, ?, ?, ?)"); r.data.forEach(k => { stmt.run(crypto.symbol, k[0], parseFloat(k[1]), parseFloat(k[2]), parseFloat(k[3]), parseFloat(k[4]), parseFloat(k[5])); }); stmt.finalize(); return true; } catch (e) { console.error(`\n❌ Gagal mengambil data historis untuk ${crypto.symbol}:`, e.message); return false; } }
 function getDataFromDB(symbol, limit = 500) { return new Promise((resolve, reject) => { db.all(`SELECT * FROM market_data WHERE symbol = ? ORDER BY timestamp DESC LIMIT ?`, [symbol, limit], (err, rows) => { if (err) reject(err); resolve(rows.reverse()); }); }); }
-async function getLatestPrice(symbol) { const data = await getDataFromDB(symbol, 1); return data && data.length > 0 ? data[0].close : null; }
+
+// ## DIPERBARUI: Fungsi untuk mendapatkan harga real-time
+async function getRealTimePrice(symbol) {
+    try {
+        const response = await axios.get(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`);
+        return parseFloat(response.data.price);
+    } catch (error) {
+        console.error(`❌ Gagal mengambil harga real-time untuk ${symbol}:`, error.message);
+        return null; // Kembalikan null jika gagal
+    }
+}
 
 
 // --- Analisis Engine (Logika tidak berubah) ---
@@ -87,7 +96,8 @@ async function runFullAnalysis(logCallback = null) {
     const updateLog = async (text) => { if (logCallback) await logCallback(text); };
     await updateLog("<code>[1/4]</code> Mengambil indeks pasar...");
     await getFearAndGreedIndex();
-    let fullReport = `<b>Analisis Pasar Komprehensif</b>\n<i>${new Date().toLocaleString('id-ID')}</i>\n\n`;
+    // ## DIPERBARUI: Menggunakan zona waktu WIB
+    let fullReport = `<b>Analisis Pasar Komprehensif</b>\n<i>${new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' })}</i>\n\n`;
     fullReport += `<b>Indeks Pasar:</b> ${fearAndGreedIndex.value} (${fearAndGreedIndex.classification})\n--------------------------------------\n`;
     await updateLog("<code>[2/4]</code> Memeriksa data historis...");
     await delay(500);
@@ -102,7 +112,11 @@ async function runFullAnalysis(logCallback = null) {
         if (!analysis1h || !analysis4h) continue;
         const longTermTrend = { trend: analysis4h.rsi > 55 ? 'Bullish' : (analysis4h.rsi < 45 ? 'Bearish' : 'Netral') };
         const prediction = predictPriceMovement(crypto, analysis1h, longTermTrend, fearAndGreedIndex);
-        const currentPrice = analysis1h.currentPrice;
+
+        // ## DIPERBARUI: Mengambil harga real-time untuk ditampilkan
+        const currentPrice = await getRealTimePrice(crypto.symbol);
+        if (currentPrice === null) continue; // Lewati jika gagal mengambil harga
+
         let emoji, actionText;
         if (prediction.action === 'BUY') { emoji = '🟢'; actionText = `<b>Sinyal: ${prediction.action}</b>`; }
         else if (prediction.action === 'SELL') { emoji = '🔴'; actionText = `<b>Sinyal: ${prediction.action}</b>`; }
@@ -125,9 +139,9 @@ async function runFullAnalysis(logCallback = null) {
 const mainMenuKeyboard = { inline_keyboard: [ [{ text: '⚡ Analisis Sinyal', callback_data: 'run_analysis' }], [{ text: '💼 Portofolio & Trading', callback_data: 'portfolio_menu' }], [{ text: '⚙️ Pengaturan', callback_data: 'open_settings' }], [{ text: '❓ Bantuan', callback_data: 'show_help' }] ] };
 async function getSettingsKeyboard(telegram_id) { const user = await getUser(telegram_id); const interval = user.notification_interval; const notifStatus = user.notifications_enabled ? '✅ AKTIF' : '❌ NONAKTIF'; const toggleNotifText = user.notifications_enabled ? 'Matikan Notifikasi' : 'Aktifkan Notifikasi'; return { inline_keyboard: [ [{ text: `Status Notifikasi: ${notifStatus}`, callback_data: 'do_nothing' }], [{ text: toggleNotifText, callback_data: 'toggle_notifications' }], [{ text: 'Ubah Interval Notifikasi', callback_data: 'do_nothing' }], [ { text: interval === '15m' ? '✅ 15m' : '15m', callback_data: 'set_interval_15m' }, { text: interval === '30m' ? '✅ 30m' : '30m', callback_data: 'set_interval_30m' } ], [ { text: interval === '1h' ? '✅ 1j' : '1j', callback_data: 'set_interval_1h' }, { text: interval === '4h' ? '✅ 4j' : '4j', callback_data: 'set_interval_4h' } ], [{ text: '⬅️ Kembali ke Menu Utama', callback_data: 'back_to_main' }] ] }; }
 
-// ## DIPERBARUI: Logika simulasi dengan jumlah fleksibel
+// ## DIPERBARUI: Menggunakan harga real-time untuk transaksi
 async function handleBuy(userId, symbol, usdtAmount) {
-    const price = await getLatestPrice(symbol);
+    const price = await getRealTimePrice(symbol);
     if (!price) return "Gagal mendapatkan harga terkini. Coba lagi.";
 
     const user = await getUser(userId);
@@ -156,7 +170,7 @@ async function handleBuy(userId, symbol, usdtAmount) {
 }
 
 async function handleSell(userId, symbol, cryptoAmountToSell) {
-    const price = await getLatestPrice(symbol);
+    const price = await getRealTimePrice(symbol);
     if (!price) return "Gagal mendapatkan harga terkini. Coba lagi.";
 
     return new Promise((resolve) => {
@@ -199,7 +213,8 @@ async function displayPortfolio(userId) {
             } else {
                 let totalPortfolioValue = 0, totalCost = 0;
                 for (const asset of rows) {
-                    const currentPrice = await getLatestPrice(asset.symbol);
+                    // ## DIPERBARUI: Menggunakan harga real-time untuk P&L
+                    const currentPrice = await getRealTimePrice(asset.symbol);
                     if (!currentPrice) continue;
                     const currentValue = asset.amount * currentPrice;
                     const cost = asset.amount * asset.avg_buy_price;
@@ -235,7 +250,7 @@ bot.setMyCommands([
     { command: '/start', description: '🚀 Mulai bot & tampilkan menu' },
     { command: '/analyze', description: '⚡ Jalankan analisis sinyal' },
     { command: '/portfolio', description: '💼 Lihat portofolio & trading' },
-    { command: '/buy', description: '💰 Beli Aset. Contoh: /buy BTC 100' },
+    { command: '/buy', description: '� Beli Aset. Contoh: /buy BTC 100' },
     { command: '/sell', description: '💸 Jual Aset. Contoh: /sell BTC 0.01' },
     { command: '/deposit', description: '🏦 Tambah saldo USDT simulasi' },
     { command: '/settings', description: '⚙️ Buka pengaturan notifikasi' },
@@ -243,13 +258,12 @@ bot.setMyCommands([
 ]);
 
 const sendMainMenu = async (chatId, text) => { bot.sendMessage(chatId, text, { reply_markup: mainMenuKeyboard, parse_mode: 'HTML' }); };
-bot.onText(/\/start/, async (msg) => { await findOrCreateUser(msg); const text = `👋 Halo, <b>${msg.from.first_name}</b>!\n\nSelamat datang di Bot Trading Cerdas (v6.2).\nBot ini kini dilengkapi trading manual. Anda diberi modal awal 10,000 USDT. Gunakan menu di bawah.`; sendMainMenu(msg.chat.id, text); });
-bot.onText(/\/help/, (msg) => { const helpText = `<b>Bantuan Bot Trading Cerdas v6.2</b>\n\n/start - Menampilkan menu utama.\n/analyze - Menjalankan analisis sinyal.\n/portfolio - Melihat aset dan melakukan trading manual.\n/buy [SIMBOL] [JUMLAH_USDT] - Contoh: <code>/buy BTC 100</code>\n/sell [SIMBOL] [JUMLAH_ASET] - Contoh: <code>/sell BTC 0.01</code>\n/deposit [jumlah] - Menambah saldo USDT. Contoh: <code>/deposit 500</code>\n/settings - Mengubah frekuensi notifikasi.`; bot.sendMessage(msg.chat.id, helpText, { parse_mode: 'HTML' }); });
+bot.onText(/\/start/, async (msg) => { await findOrCreateUser(msg); const text = `👋 Halo, <b>${msg.from.first_name}</b>!\n\nSelamat datang di Bot Trading Cerdas (v6.3).\nBot ini kini dilengkapi trading manual dengan harga real-time. Anda diberi modal awal 10,000 USDT. Gunakan menu di bawah.`; sendMainMenu(msg.chat.id, text); });
+bot.onText(/\/help/, (msg) => { const helpText = `<b>Bantuan Bot Trading Cerdas v6.3</b>\n\n/start - Menampilkan menu utama.\n/analyze - Menjalankan analisis sinyal.\n/portfolio - Melihat aset dan melakukan trading manual.\n/buy [SIMBOL] [JUMLAH_USDT] - Contoh: <code>/buy BTC 100</code>\n/sell [SIMBOL] [JUMLAH_ASET] - Contoh: <code>/sell BTC 0.01</code>\n/deposit [jumlah] - Menambah saldo USDT. Contoh: <code>/deposit 500</code>\n/settings - Mengubah frekuensi notifikasi.`; bot.sendMessage(msg.chat.id, helpText, { parse_mode: 'HTML' }); });
 bot.onText(/\/settings/, (msg) => { handleCallbackQuery({ data: 'open_settings', message: msg, from: msg.from }); });
 bot.onText(/\/analyze/, (msg) => { handleCallbackQuery({ data: 'run_analysis', message: msg, from: msg.from }); });
 bot.onText(/\/portfolio/, (msg) => { handleCallbackQuery({ data: 'portfolio_menu', message: msg, from: msg.from }); });
 
-// ## BARU: Handler untuk perintah trading manual
 bot.onText(/\/buy (\w+) (.+)/, async (msg, match) => {
     const userId = msg.from.id;
     const symbolQuery = match[1].toUpperCase();
@@ -287,9 +301,7 @@ bot.onText(/\/deposit (.+)/, async (msg, match) => {
     bot.sendMessage(msg.chat.id, `✅ Deposit <b>${amount} USDT</b> berhasil.\nSaldo Anda sekarang: <b>${newBalance.toFixed(2)} USDT</b>.`, { parse_mode: 'HTML' });
 });
 
-// ## DIPERBARUI: Handler pesan umum untuk input jumlah
 bot.on('message', async (msg) => {
-    // Abaikan jika itu adalah perintah
     if (msg.text && msg.text.startsWith('/')) return;
 
     const userId = msg.from.id;
@@ -310,7 +322,7 @@ bot.on('message', async (msg) => {
         }
 
         bot.sendMessage(msg.chat.id, result, { parse_mode: 'HTML' });
-        delete userActionStates[userId]; // Hapus state setelah selesai
+        delete userActionStates[userId];
     }
 });
 
@@ -323,7 +335,6 @@ async function handleCallbackQuery(query) {
     const userId = from.id;
     await findOrCreateUser({ from, chat: { id: chatId } });
 
-    // ## DIPERBARUI: Logika untuk menu trading interaktif
     if (data.startsWith('trade_')) {
         const symbol = data.split('_')[1];
         const keyboard = { inline_keyboard: [
@@ -372,7 +383,7 @@ async function handleCallbackQuery(query) {
         case 'set_interval_15m': case 'set_interval_30m': case 'set_interval_1h': case 'set_interval_4h': const interval = data.split('_')[2]; await updateUserSetting(userId, 'notification_interval', interval); const intervalText = interval.replace('m', ' Menit').replace('h', ' Jam'); bot.answerCallbackQuery(query.id, { text: `Interval diatur ke ${intervalText}.` }); const updatedKeyboard = await getSettingsKeyboard(userId); bot.editMessageReplyMarkup(updatedKeyboard, { chat_id: chatId, message_id: message.message_id }); break;
         case 'back_to_main': bot.editMessageText("Anda kembali ke menu utama.", { chat_id: chatId, message_id: message.message_id, reply_markup: mainMenuKeyboard }); break;
         case 'do_nothing': bot.answerCallbackQuery(query.id); break;
-        case 'show_help': const helpText = `<b>Bantuan Bot Trading Cerdas v6.2</b>...`; bot.sendMessage(chatId, helpText, { parse_mode: 'HTML' }); break;
+        case 'show_help': const helpText = `<b>Bantuan Bot Trading Cerdas v6.3</b>...`; bot.sendMessage(chatId, helpText, { parse_mode: 'HTML' }); break;
     }
     bot.answerCallbackQuery(query.id).catch(()=>{});
 }
@@ -380,8 +391,9 @@ async function handleCallbackQuery(query) {
 
 // --- Penjadwal Notifikasi Pengguna ---
 cron.schedule('*/15 * * * *', async () => {
+    // ## DIPERBARUI: Menggunakan zona waktu WIB
     const now = new Date();
-    console.log(`\n🕒 Menjalankan Penjadwal Notifikasi pada ${now.toLocaleTimeString('id-ID')}...`);
+    console.log(`\n🕒 Menjalankan Penjadwal Notifikasi pada ${now.toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' })}...`);
     try {
         const users = await new Promise((resolve, reject) => { db.all("SELECT * FROM users WHERE notifications_enabled = 1", (err, rows) => { if (err) reject(err); resolve(rows); }); });
         if (users.length === 0) { console.log("Tidak ada pengguna aktif untuk dinotifikasi."); return; }
@@ -413,10 +425,20 @@ cron.schedule('*/15 * * * *', async () => {
 
 // --- Siklus Pengambilan Data Otomatis ---
 const DATA_FETCH_INTERVAL_SECONDS = 3 * 60;
-async function fetchAndCacheAllMarketData() { console.log(`\n\n[${new Date().toLocaleString('id-ID')}] 🔄 Memulai siklus pembaruan data...`); for (const crypto of CRYPTOS) { await fetchAndStoreHistoricalData(crypto, '1h'); await fetchAndStoreHistoricalData(crypto, '4h'); await delay(500); } console.log(`[${new Date().toLocaleString('id-ID')}] ✅ Siklus pembaruan data selesai.`); }
+async function fetchAndCacheAllMarketData() {
+    // ## DIPERBARUI: Menggunakan zona waktu WIB
+    const now = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
+    console.log(`\n\n[${now}] 🔄 Memulai siklus pembaruan data...`);
+    for (const crypto of CRYPTOS) {
+        await fetchAndStoreHistoricalData(crypto, '1h');
+        await fetchAndStoreHistoricalData(crypto, '4h');
+        await delay(500);
+    }
+    console.log(`[${now}] ✅ Siklus pembaruan data selesai.`);
+}
 function startCliCountdown(seconds) { let r = seconds; const i = setInterval(() => { const m = Math.floor(r / 60); const s = r % 60; process.stdout.write(`⏳ Pembaruan data berikutnya dalam: ${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')} \r`); r--; if (r < 0) clearInterval(i); }, 1000); }
 async function dataFetchLoop() { await fetchAndCacheAllMarketData(); startCliCountdown(DATA_FETCH_INTERVAL_SECONDS); setTimeout(dataFetchLoop, DATA_FETCH_INTERVAL_SECONDS * 1000); }
 
 // --- Mulai Bot ---
-console.log("🚀 Bot Cerdas (v6.2) Dimulai... Trading manual diaktifkan!");
+console.log("🚀 Bot Cerdas (v6.3) Dimulai... Harga real-time & WIB aktif!");
 dataFetchLoop();
