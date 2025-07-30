@@ -1,23 +1,23 @@
-# Use an official Node.js runtime as a parent image
-FROM node:18-alpine
+FROM node:20-alpine
 
-# Set the working directory in the container
-WORKDIR /app
+# Tetapkan direktori kerja di dalam kontainer
+WORKDIR /usr/src/app
 
-# Copy package.json and package-lock.json to the working directory
-# This allows us to take advantage of Docker layer caching
-# If only the application code changes, npm install won't be re-run
+# Salin file package.json dan package-lock.json (jika ada)
+# Ini memanfaatkan cache Docker. Langkah 'npm install' hanya akan berjalan
+# kembali jika file-file ini berubah.
 COPY package*.json ./
 
-# Install Node.js dependencies
+# Instal semua dependensi yang dibutuhkan oleh bot
 RUN npm install
 
-# Copy the rest of the application files to the working directory
+# Salin semua sisa kode aplikasi ke dalam direktori kerja
 COPY . .
 
-# Expose port 3000, as it's a common default for Node.js applications
-EXPOSE 3000
+# Instruksi ini memberitahu Docker bahwa direktori ini akan digunakan untuk
+# menyimpan data yang persisten (database SQLite). Anda harus me-mount
+# volume ke path ini saat menjalankan kontainer.
+VOLUME /usr/src/app
 
-# Define the command to run the application
-# Assuming the main application file is bot.js
+# Perintah default yang akan dijalankan saat kontainer dimulai
 CMD ["node", "bot.js"]
